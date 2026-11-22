@@ -235,12 +235,18 @@ local function sync_profile()
     local avatar_cur = avatar_state()
     local snap = stats_snapshot()
     local send_stats = stats_due(snap)
-    if name_ok and not avatar_cur and not creator_check_due() and not send_stats then return true end
+    -- Version du plugin : envoyée au serveur pour que les autres joueurs sachent si ta version est trop ancienne.
+    local ver = tostring(_G.SEFIRAH_VERSION or "")
+    local ver_due = ver ~= "" and Settings:get("leaderboard_version_synced") ~= ver
+    if name_ok and not avatar_cur and not creator_check_due() and not send_stats and not ver_due then return true end
     local res, err, code = request("POST", "/api/profile", {
         player_id = player_id(), player_token = player_token(), username = username,
+        plugin_version = ver_due and ver or nil,
     })
     if res and res.ok then
         Settings:set("leaderboard_username_synced", username)
+        -- Marqué « envoyé » seulement si le serveur l'a bien enregistré (un ancien serveur l'ignore : on réessaiera).
+        if ver_due and res.plugin_version == ver then Settings:set("leaderboard_version_synced", ver) end
         note_creator(res)
     elseif code == "username_taken" then return false, username_refused(), code
     else return false end   -- ancien serveur sans /api/profile, ou joueur encore inconnu : le prochain envoi d'XP renommera

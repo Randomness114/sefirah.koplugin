@@ -49,7 +49,7 @@ local MAX_HOPS = 5
 -- après une courte pause réussit très souvent. « timeout » simple n'en fait pas
 -- partie : retenter un serveur qui ne répond pas ne ferait que doubler l'attente.
 local TRANSIENT = { "wantread", "wantwrite", "connection reset",
-                    "closed", "broken pipe" }
+                    "closed", "broken pipe", "write error", "syscall" }
 local function is_transient(code)
     if type(code) == "number" then
         return code == 429 or code == 502 or code == 503 or code == 504
@@ -203,6 +203,9 @@ function Net.get(url, opts)
            or (socket.gettime() - t0) > deadline * 0.5 then
             break
         end
+        -- « write error » : la requête n'a pas pu partir (TLS coupé en route). On retente
+        -- sans compression, avec une connexion neuve.
+        if tostring(code or ""):lower():find("write", 1, true) then headers["Accept-Encoding"] = nil end
         pcall(socket.sleep, 0.7 * tries)
     end
 

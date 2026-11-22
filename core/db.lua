@@ -234,7 +234,12 @@ local function ensure_cover_cache_dir()
 end
 
 local function cache_key(source_id, novel_path)
-    return (source_id .. "__" .. novel_path):gsub("[^%w%-]", "_")
+    local raw = source_id .. "__" .. novel_path
+    local t = raw:gsub("[^%w%-]", "_")
+    if #t <= 200 then return t end   -- limite de 255 octets par nom de fichier (liens arabes très longs)
+    local h1, h2 = 5381, 52711
+    for i = 1, #raw do local c = raw:byte(i); h1 = (h1 * 33 + c) % 4294967296; h2 = (h2 * 31 + c) % 4294967296 end
+    return t:sub(1, 183) .. "_" .. string.format("%08x%08x", h1, h2)
 end
 
 function DB.loadChapterCache(source_id, novel_path)

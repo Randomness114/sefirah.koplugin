@@ -54,32 +54,39 @@ local function collapse_repeated_title(t)
 end
 
 local function apply_search_and_sort(novels)
-    for _, n in ipairs(novels) do n.title = collapse_repeated_title(n.title) end
-    local out = novels
-    if _search and _search ~= "" then
-        local needle = _search:lower()
-        local filtered = {}
-        for _, n in ipairs(out) do
-            if (n.title or ""):lower():find(needle, 1, true) then
-                table.insert(filtered, n)
+    local needle = (_search and _search ~= "") and _search:lower() or nil
+    local decorated = {}
+    for i, n in ipairs(novels) do
+        n.title = collapse_repeated_title(n.title)
+        local title = (n.title or ""):lower()
+        if not needle or title:find(needle, 1, true) then
+            local key
+            if _sort == "title_asc" or _sort == "title_desc" then
+                key = title
+            elseif _sort == "new_first" then
+                key = tonumber(n.new_chapters) or 0
+            elseif _sort == "recent" then
+                key = tonumber(n.added_at) or 0
+            elseif _sort == "last_read" then
+                key = tonumber(n.last_read_at) or 0
             end
+            decorated[#decorated + 1] = { item = n, key = key, index = i }
         end
-        out = filtered
+    end
+
+    if _sort == "title_asc" or _sort == "title_desc" or _sort == "new_first"
+       or _sort == "recent" or _sort == "last_read" then
+        local descending = _sort == "title_desc" or _sort == "new_first"
+            or _sort == "recent" or _sort == "last_read"
+        table.sort(decorated, function(a, b)
+            if a.key == b.key then return a.index < b.index end
+            if descending then return a.key > b.key end
+            return a.key < b.key
+        end)
     end
 
     local sorted = {}
-    for i, n in ipairs(out) do sorted[i] = n end
-    if _sort == "title_asc" then
-        table.sort(sorted, function(a, b) return (a.title or ""):lower() < (b.title or ""):lower() end)
-    elseif _sort == "title_desc" then
-        table.sort(sorted, function(a, b) return (a.title or ""):lower() > (b.title or ""):lower() end)
-    elseif _sort == "new_first" then
-        table.sort(sorted, function(a, b) return (a.new_chapters or 0) > (b.new_chapters or 0) end)
-    elseif _sort == "recent" then
-        table.sort(sorted, function(a, b) return (a.added_at or 0) > (b.added_at or 0) end)
-    elseif _sort == "last_read" then
-        table.sort(sorted, function(a, b) return (a.last_read_at or 0) > (b.last_read_at or 0) end)
-    end
+    for i, entry in ipairs(decorated) do sorted[i] = entry.item end
     return sorted
 end
 

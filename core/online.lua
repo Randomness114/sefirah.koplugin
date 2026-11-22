@@ -16,7 +16,8 @@ local socket = require("socket")
 local Online = {}
 
 local HOSTS = { { "1.1.1.1", 443 }, { "8.8.8.8", 53 }, { "9.9.9.9", 443 } }
-local OK_TTL, KO_TTL = 20, 4
+local OK_TTL, KO_TTL = 30, 8
+local PROBE_TIMEOUT = 0.8
 local RETRY_GAP = 45          -- secondes mini entre deux demandes d'activation du Wi-Fi
 
 local function tr(s)
@@ -30,7 +31,7 @@ local _last_wifi_request = nil
 local function tcp_ok(host, port)
     local s = socket.tcp()
     if not s then return false end
-    s:settimeout(2)
+    s:settimeout(PROBE_TIMEOUT)
     local ok = s:connect(host, port)
     pcall(s.close, s)
     return ok and true or false

@@ -10,6 +10,7 @@ local https  = require("ssl.https")
 local ltn12  = require("ltn12")
 local socket = require("socket")
 local logger = require("logger")
+local T = require("core.i18n").T
 local ok_json, JSON = pcall(require, "rapidjson")
 if not ok_json then JSON = require("json") end
 local Settings = require("sefirah_settings")
@@ -201,11 +202,11 @@ local function gtx_request(text, target)
     }
     local resp = table.concat(sink)
     if not ok or code ~= 200 then
-        return nil, "Google Traduction indisponible (" .. tostring(code) .. ")"
+        return nil, T("Google Traduction indisponible (") .. tostring(code) .. ")"
     end
     local okd, data = pcall(JSON.decode, resp)
     if not okd or type(data) ~= "table" or type(data[1]) ~= "table" then
-        return nil, "réponse Google Traduction invalide"
+        return nil, T("réponse Google Traduction invalide")
     end
     local out = {}
     for _, row in ipairs(data[1]) do
@@ -214,7 +215,7 @@ local function gtx_request(text, target)
         end
     end
     local tr = table.concat(out)
-    if tr == "" then return nil, "réponse Google Traduction vide" end
+    if tr == "" then return nil, T("réponse Google Traduction vide") end
     return tr
 end
 
@@ -292,7 +293,7 @@ end
 local function call_deepl(html)
     local key = Settings:get("translate_deepl_key")
     if type(key) ~= "string" or key == "" then
-        return nil, "clé DeepL manquante"
+        return nil, T("clé DeepL manquante")
     end
     local target = target_code()
     local params = require("socket.url")
@@ -318,20 +319,20 @@ local function call_deepl(html)
         local tr = okd and type(data) == "table" and data.translations
             and data.translations[1] and data.translations[1].text
         if type(tr) == "string" and tr ~= "" then return tr end
-        return nil, "réponse DeepL vide"
+        return nil, T("réponse DeepL vide")
     end
-    if code == 429 then return nil, "quota/limite DeepL atteinte (429)" end
-    if code == 403 then return nil, "clé DeepL refusée (403)" end
-    return nil, "DeepL indisponible (" .. tostring(code) .. ")"
+    if code == 429 then return nil, T("quota/limite DeepL atteinte (429)") end
+    if code == 403 then return nil, T("clé DeepL refusée (403)") end
+    return nil, T("DeepL indisponible (") .. tostring(code) .. ")"
 end
 
 -- Gemini est conservé comme solution de secours.
 local function call_gemini(prompt)
     local key = Settings:get("translate_api_key")
-    if type(key) ~= "string" or key == "" then return nil, "clé Gemini absente" end
+    if type(key) ~= "string" or key == "" then return nil, T("clé Gemini absente") end
     local models = model_list()
     if _good_model then table.insert(models, 1, _good_model) end
-    local last_err = "erreur inconnue"
+    local last_err = T("erreur inconnue")
     for _, model in ipairs(models) do
         local url = "https://generativelanguage.googleapis.com/v1beta/models/"
             .. model .. ":generateContent?key=" .. key
@@ -359,11 +360,11 @@ local function call_gemini(prompt)
                     local text=table.concat(acc)
                     if text~="" then _good_model=model; return text end
                 end
-                last_err="réponse Gemini vide"
+                last_err=T("réponse Gemini vide")
             elseif code==429 or code==500 or code==503 then
-                last_err="limite Gemini ("..tostring(code)..")"; socket.sleep(4*attempt)
+                last_err=T("limite Gemini (")..tostring(code)..")"; socket.sleep(4*attempt)
             elseif code==404 then
-                last_err="modèle Gemini indisponible"; break
+                last_err=T("modèle Gemini indisponible"); break
             else
                 last_err="Gemini ("..tostring(code)..")"; break
             end
@@ -427,6 +428,57 @@ function Translate.chapter(html, source_id, novel_path, key, progress)
     if meta then result = result .. "\n" .. meta end
     Cache.storeTranslation(source_id, novel_path, key, lang, result)
     return result
+end
+
+-- Version « arrière-plan » de Translate.chapter : la traduction tourne dans un
+-- sous-processus (comme les téléchargements, cf. core/parallel.lua) et écrit son
+-- résultat dans le cache disque. L'interface reste libre pendant ce temps.
+-- Avant, Translate.chapter était appelé directement dans l'interface : chaque
+-- requête HTTPS (timeout 90 s) bloquait tout l'écran → gel de la liseuse.
+-- on_done(html_traduit) en cas de succès, on_done(nil, erreur) sinon.
+function Translate.chapterAsync(html, source_id, novel_path, key, on_done)
+    local lang = Translate.lang()
+    local cached = Cache.getTranslation(source_id, novel_path, key, lang)
+    if cached then return on_done(fix_double_escape(cached)) end
+
+    -- Jamais de traduction dans l'interface : sans sous-processus, on n'affiche pas de
+    -- traduction (le texte original reste lisible) au lieu de geler la liseuse.
+    -- Les chapitres téléchargés avec la traduction auto sont déjà traduits (cache).
+    local function unavailable()
+        return on_done(nil, T("indisponible sur cet appareil"))
+    end
+
+    local ok_p, Parallel = pcall(require, "core.parallel")
+    if not ok_p or not Parallel.available() then return unavailable() end
+
+    -- Le sous-processus ne peut pas renvoyer l'erreur directement : il l'écrit ici.
+    local ok_t, errfile = pcall(os.tmpname)
+    if not ok_t then errfile = nil end
+
+    local function job()
+        local ok, tr, err = pcall(Translate.chapter, html, source_id, novel_path, key)
+        if not (ok and tr) and errfile then
+            local f = io.open(errfile, "w")
+            if f then f:write(tostring(ok and err or tr)); f:close() end
+        end
+    end
+
+    local launched = Parallel.pool({ job }, 1, function()
+        local tr = Cache.getTranslation(source_id, novel_path, key, lang)
+        local err
+        if not tr and errfile then
+            local f = io.open(errfile, "r")
+            if f then err = f:read("*a"); f:close() end
+        end
+        if errfile then os.remove(errfile) end
+        if tr then return on_done(fix_double_escape(tr)) end
+        on_done(nil, (err and err ~= "") and err or "translation_failed")
+    end, { job_timeout = 600, timeout = 610 })
+
+    if not launched then
+        if errfile then os.remove(errfile) end
+        return unavailable()
+    end
 end
 
 return Translate

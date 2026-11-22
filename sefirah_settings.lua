@@ -87,6 +87,8 @@ local DEFAULTS = {
     -- reader_hide_title_asked : la question posée à l'ouverture a déjà reçu une réponse.
     reader_hide_title       = false,
     reader_hide_title_asked = false,
+    -- Lecteur de roman : marges haut/bas du texte (1 = Petites, 2 = Moyennes, 3 = Grandes).
+    reader_margins_idx      = 1,
     -- Petits popups de quêtes / succès / niveau pendant la lecture : désactivés par défaut.
     quest_notifications = false,
     -- Alertes « nouveau chapitre » : "ask" (demander à chaque favori), "all", "none".

@@ -11,6 +11,7 @@ local Geom            = require("ui/geometry")
 local HorizontalGroup = require("ui/widget/horizontalgroup")
 local HorizontalSpan  = require("ui/widget/horizontalspan")
 local ImageWidget     = require("ui/widget/imagewidget")
+local InputContainer  = require("ui/widget/container/inputcontainer")
 local InfoMessage     = require("ui/widget/infomessage")
 local LeftContainer   = require("ui/widget/container/leftcontainer")
 local LineWidget      = require("ui/widget/linewidget")
@@ -84,6 +85,17 @@ local _rg = {}
 local function rgap(h) local g = VerticalSpan:new{ width = h }; _rg[#_rg + 1] = g; return g end
 local function hgap(w) return HorizontalSpan:new{ width = w } end
 local function inset(w) return HorizontalGroup:new{ hgap(M), w } end
+
+-- Cibles de la visite guidée : on enveloppe l'élément dans un conteneur sans geste ;
+-- son `dimen` est mis à jour à chaque dessin, donc la visite connaît sa position exacte.
+local _tt = {}
+local function mark(name, w)
+    local s = w:getSize()
+    local c = InputContainer:new{ dimen = Geom:new{ x = 0, y = 0, w = s.w, h = s.h }, w }
+    c.ges_events = {}
+    _tt[name] = c
+    return c
+end
 
 local function fmt(n)
     local s = tostring(math.floor(tonumber(n) or 0))
@@ -159,11 +171,134 @@ local function show_help()
 end
 Progress.showHelp = show_help
 
+local TABS = {
+    { id = "progress", label = "Progression", icon = "tab_progress", on = "tab_progress_on" },
+    { id = "quests",   label = "Quêtes",      icon = "tab_quests",   on = "tab_quests_on" },
+    { id = "rank",     label = "Classement",  icon = "tab_rank",     on = "tab_rank" },
+    { id = "achv",     label = "Succès",      icon = "tab_achv",     on = "tab_achv_on" },
+}
+
+-- ── Visite guidée de première ouverture ─────────────────────────────────────
+-- Cadre autour du vrai contrôle + flèche dessinée + bulle (cf. ui/tour.lua).
+local redraw -- assigned by the screen renderer below
+local rank_autorefresh -- assigned below
+local TOUR_FLAG = "progress_tour_v3_seen"
+
+-- Zone de l'onglet du bas (calculée : la barre d'onglets occupe le bas de l'écran).
+local function tab_rect(id)
+    local base = math.floor(W / #TABS)
+    for i, t in ipairs(TABS) do
+        if t.id == id then
+            local cw = (i == #TABS) and (W - base * (#TABS - 1)) or base
+            return Geom:new{ x = (i - 1) * base, y = P.H - TAB_H, w = cw, h = TAB_H }
+        end
+    end
+end
+-- Zone d'un élément repéré par mark() (position réelle après dessin).
+local function mark_rect(name)
+    local c = _tt[name]
+    if not c or not c.dimen then return nil end
+    return Geom:new{ x = c.dimen.x, y = c.dimen.y, w = c.dimen.w, h = c.dimen.h }
+end
+local function show_tab(tab, rtab)
+    if not _screen then return end
+    if _tab == tab and (not rtab or _rtab == rtab) then return end
+    _tab = tab
+    if rtab then _rtab, _rpage = rtab, 1 end
+    redraw(false)
+    if tab == "rank" then rank_autorefresh() end
+end
+
+local function tour_steps()
+    local LB = require("core.leaderboard")
+    return {
+        {
+            title = T("Le classement communautaire"),
+            body = T("Touche l'onglet « Classement » pour découvrir les lecteurs Sefirah, leurs niveaux et leur XP."),
+            prepare = function() show_tab("progress") end,
+            delay = 0,      -- rien à redessiner à l'ouverture : la bulle apparaît au prochain cycle
+            target = function() return tab_rect("rank") end,
+            primary = { text = T("Voir le classement") },
+        },
+        {
+            title = T("Crée ton compte"),
+            body = function()
+                local b = T("Touche le bouton « Pseudo » pour choisir ton pseudo public unique.\n\nIl est obligatoire pour apparaître dans le classement et utiliser les fonctions communautaires. Ta progression personnelle reste disponible sans compte.")
+                local u = LB.username()
+                if u ~= "" then b = b .. "\n\n" .. T("Ton pseudo actuel : %s"):format(u) end
+                return b
+            end,
+            prepare = function() show_tab("rank", "general") end,
+            target = function() return mark_rect("pseudo") end,
+            primary = function()
+                if LB.username() ~= "" then return nil end
+                return { text = T("Créer mon pseudo"), action = function(nxt)
+                    LB.configure("leaderboard_username", T("Choisis ton pseudo public"), function()
+                        redraw(true)
+                        UIManager:scheduleIn(0.2, nxt)
+                    end)
+                end }
+            end,
+        },
+        {
+            title = T("Consulter le classement"),
+            body = T("Le podium présente les trois premiers joueurs ; juste en dessous, tu retrouves les rangs, les pseudos, les niveaux et l'XP. Touche un joueur ou sa photo pour voir son profil et ses statistiques."),
+            prepare = function() show_tab("rank", "general") end,
+            target = function() return mark_rect("podium") end,
+        },
+        {
+            title = T("Ta photo de profil"),
+            body = T("Touche ton avatar, en haut de l'onglet « Progression », pour choisir une image depuis la liseuse, en chercher une en ligne, coller un lien ou retirer ta photo.\n\nElle est associée à ton profil et peut apparaître dans le classement."),
+            prepare = function() show_tab("progress") end,
+            target = function() return mark_rect("avatar") end,
+        },
+        {
+            title = T("Besoin d'aide ?"),
+            body = T("Touche le bouton « i » pour voir comment gagner de l'XP, comprendre les niveaux ou revoir cette visite guidée."),
+            target = function() return Geom:new{ x = W - sc(56), y = 0, w = sc(56), h = HDR_H } end,
+            primary = { text = T("Terminer") },
+        },
+    }
+end
+
+local function run_tour()
+    Settings:set(TOUR_FLAG, true)
+    require("ui.tour").run(tour_steps(), { alive = function() return _screen ~= nil end })
+end
+
+local function start_first_visit_tour()
+    if Settings:get(TOUR_FLAG) == true then return end
+    if _screen then run_tour() end      -- tout de suite : l'écran est déjà affiché, aucune attente
+end
+
+-- Relance la visite guidée à la demande (bouton « i » du Centre de progression).
+local function restart_tour()
+    UIManager:scheduleIn(0.2, function()
+        if _screen then run_tour() end
+    end)
+end
+
+local function show_help_menu()
+    local ButtonDialogTitle = require("ui/widget/buttondialogtitle")
+    local dlg
+    local function close() if dlg then UIManager:close(dlg); dlg = nil end end
+    dlg = ButtonDialogTitle:new{
+        title = T("Aide"),
+        title_align = "center",
+        buttons = {
+            {{ text = T("Gagner de l'XP et niveaux"), callback = function() close(); show_help() end }},
+            {{ text = T("Revoir la visite guidée"), callback = function() close(); restart_tour() end }},
+            {{ text = T("Fermer"), callback = close }},
+        },
+    }
+    UIManager:show(dlg)
+end
+
 local function make_header(title, sub, icon_name, on_back)
     local back = P.wrapTappable(slot(sc(46), HDR_H, text("←", 26, { bold = true }), "center"), on_back)
     local ic = slot(sc(54), HDR_H, icon(icon_name, sc(38)), "center")
     local info_w = sc(56)
-    local info = P.wrapTappable(slot(info_w, HDR_H, icon("info", sc(34)), "center"), show_help)
+    local info = P.wrapTappable(slot(info_w, HDR_H, icon("info", sc(34)), "center"), show_help_menu)
     local rest = W - sc(46) - sc(54) - sc(10) - info_w
     local titles = VerticalGroup:new{ align = "left",
         text(title, 24, { bold = true, max_w = rest }),
@@ -172,12 +307,6 @@ local function make_header(title, sub, icon_name, on_back)
     return HorizontalGroup:new{ back, ic, slot(rest + sc(10), HDR_H, titles, "left"), info }
 end
 
-local TABS = {
-    { id = "progress", label = "Progression", icon = "tab_progress", on = "tab_progress_on" },
-    { id = "quests",   label = "Quêtes",      icon = "tab_quests",   on = "tab_quests_on" },
-    { id = "rank",     label = "Classement",  icon = "tab_rank",     on = "tab_rank" },
-    { id = "achv",     label = "Succès",      icon = "tab_achv",     on = "tab_achv_on" },
-}
 
 local function make_tabbar(active, switch)
     local cells = {}
@@ -281,9 +410,9 @@ local function build_progress(avail, go, redraw)
         local aw = av + sc(28)
         local lw = sc(104)
         local rw = iw - aw - lw - sc(1) - sc(30)
-        local avatar = P.wrapTappable(slot(aw, hh, avatar_widget(av), "center"), function()
+        local avatar = mark("avatar", P.wrapTappable(slot(aw, hh, avatar_widget(av), "center"), function()
             Pdp.menu(function() redraw(true) end)
-        end)
+        end))
         local left = slot(lw, hh, HorizontalGroup:new{ hgap(sc(6)), VerticalGroup:new{ align = "left",
             text(T("NIVEAU"), 15, { bold = true }), text(tostring(p.level), 52, { bold = true }) } }, "left")
         local sep = slot(sc(1), hh, LineWidget:new{ dimen = Geom:new{ w = sc(1), h = hh - sz(26) }, background = LGRAY }, "center")
@@ -569,6 +698,12 @@ local function stats_text(st)
     if wpm and wpm > 0 then lines[#lines + 1] = T("%d mots/min (novels)"):format(wpm) end
     return table.concat(lines, "\n")
 end
+-- Message quand un joueur n'a pas de stats : version du plugin connue (récente, stats pas encore envoyées)
+-- ou inconnue (le serveur n'a jamais reçu de version : plugin trop ancien).
+local function no_stats_text(pl)
+    if type(pl) == "table" and pl.plugin_version then return T("Stats pas encore synchronisées") end
+    return T("Version du plugin trop ancienne pour afficher les stats")
+end
 -- Mes propres stats (toujours visibles pour moi).
 local function my_stats()
     local p = Quests.getProgress()
@@ -579,14 +714,14 @@ local function my_stats()
     end
     return st
 end
--- Légende d'un joueur : pseudo, niveau, XP, puis ses stats (ou « stats privées »).
+-- Légende d'un joueur : pseudo, niveau, XP, puis ses stats (ou, sans stats, « stats pas encore synchronisées » / « version trop ancienne » selon que le serveur connaît sa version).
 local function player_caption(pl, mine)
     local name, lvl, xp = player_fields(pl)
     local cap = name .. "\n"
     if is_creator_pl(pl, mine) then cap = cap .. T("— CRÉATEUR —") .. "\n" end
     cap = cap .. T("Niv. %d"):format(lvl) .. "  ·  " .. fmt(xp) .. " XP"
     local st = mine and my_stats() or pl.stats
-    cap = cap .. "\n\n" .. (stats_text(st) or T("Stats privées"))
+    cap = cap .. "\n\n" .. (stats_text(st) or no_stats_text(pl))
     return cap
 end
 local function name_widget(name, mark, pt, max_w, bold)
@@ -655,7 +790,7 @@ local function build_friends(avail, redraw)
     local list = {}
     for _, f in ipairs(fr.friends or {}) do
         local name, lvl, xp = player_fields(f)
-        list[#list + 1] = { name = name, lvl = lvl, xp = xp, stats = f.stats }
+        list[#list + 1] = { name = name, lvl = lvl, xp = xp, stats = f.stats, plugin_version = f.plugin_version }
     end
     list[#list + 1] = { name = T("%s (vous)"):format(my_name ~= "" and my_name or T("Vous")), lvl = me.level, xp = me.xp, me = true }
     table.sort(list, function(a, b) if a.xp ~= b.xp then return a.xp > b.xp end return a.name < b.name end)
@@ -704,7 +839,7 @@ local function build_friends(avail, redraw)
     for _, e in ipairs(shown) do
         local r = trow(tostring(e.rank), e.name, tostring(e.lvl), fmt(e.xp), { bold = e.me, bg = e.me and PALE or WHITE })
         if e.me then rows[#rows + 1] = r
-        else rows[#rows + 1] = P.wrapTappable(r, function() Friends.manage(e.name, e.lvl, function() again() end, stats_text(e.stats) or T("Stats privées")) end) end
+        else rows[#rows + 1] = P.wrapTappable(r, function() Friends.manage(e.name, e.lvl, function() again() end, stats_text(e.stats) or no_stats_text(e)) end) end
         rows[#rows + 1] = inset(hline(w))
     end
     rows[#rows + 1] = rgap(sz(12))
@@ -789,7 +924,7 @@ local function build_rank(avail, redraw)
         local function side(rank)
             return VerticalGroup:new{ align = "left", gap(hc - hs), podium_card(rank, players[rank], side_w, hs, is_me(players[rank])) }
         end
-        rows[#rows + 1] = inset(HorizontalGroup:new{ side(2), hgap(g), podium_card(1, players[1], mid_w, hc, is_me(players[1])), hgap(g), side(3) })
+        rows[#rows + 1] = inset(mark("podium", HorizontalGroup:new{ side(2), hgap(g), podium_card(1, players[1], mid_w, hc, is_me(players[1])), hgap(g), side(3) }))
         rows[#rows + 1] = rgap(sz(12))
     end
 
@@ -834,7 +969,8 @@ local function build_rank(avail, redraw)
             local prow = trow(tostring(i), name, tostring(lvl), fmt(xp), { bold = mine_row, bg = mine_row and PALE or WHITE, creator = is_creator_pl(players[i], mine_row) })
             local pl_i = players[i]
             rows[#rows + 1] = P.wrapTappable(prow, function()
-                UIManager:show(InfoMessage:new{ text = player_caption(pl_i, mine_row), timeout = 8 })
+                -- Même fiche que pour le podium : grande photo + pseudo, niveau, XP et stats.
+                Pdp.showLarge(player_caption(pl_i, mine_row), pl_i.avatar, mine_row, ICON_DIR .. "avatar.png")
             end)
             rows[#rows + 1] = inset(hline(w))
         end
@@ -879,12 +1015,12 @@ local function build_rank(avail, redraw)
         return P.wrapTappable(f, cb)
     end
     local b1 = act(T("↻ Actualiser"), manual_refresh)
-    local b2 = act(T("Pseudo"), function()
+    local b2 = mark("pseudo", act(T("Pseudo"), function()
         LB.configure("leaderboard_username", T("Pseudo public"), function()
             redraw(true)
             manual_refresh()      -- nouveau pseudo : envoi immédiat puis rafraîchissement
         end)
-    end)
+    end))
     local b3 = act(T("Serveur"), function()
         LB.configure("leaderboard_url", T("URL de l'API (ex. https://mon-serveur.example)"), function() redraw(true) end)
     end)
@@ -906,8 +1042,7 @@ local function back()
     require("ui.main_widget").show("settings")
 end
 
-local redraw
-local function rank_autorefresh()
+rank_autorefresh = function()
     pcall(function()
         local LB = require("core.leaderboard")
         local again = function() if _screen and _tab == "rank" then redraw(true) end end
@@ -931,6 +1066,7 @@ local function build_body()
     local avail = P.H - HDR_H - TAB_H - 2 * P.HAIRLINE
     local rows
     _rg = {}
+    _tt = {}
     if _tab == "quests" then rows = build_quests(avail, redraw)
     elseif _tab == "rank" then rows = build_rank(avail, redraw)
     elseif _tab == "achv" then rows = build_achv(avail, redraw)
@@ -969,11 +1105,8 @@ function Progress.show(tab)
     _tab = tab or "progress"
     redraw(false)
     if _tab == "rank" then rank_autorefresh() end
-    -- Première ouverture du centre de progression : on explique tout (comme le bouton « i »).
-    if Settings:get("progress_help_seen") ~= true then
-        Settings:set("progress_help_seen", true)
-        UIManager:scheduleIn(0.3, show_help)
-    end
+    -- Visite guidée avec flèches directionnelles à la première ouverture.
+    start_first_visit_tour()
 end
 
 return Progress

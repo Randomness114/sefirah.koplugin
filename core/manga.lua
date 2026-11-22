@@ -27,8 +27,8 @@ if not ok_lfs then lfs = require("lfs") end
 
 local Manga = {}
 
-local WAVE        = 24    -- images téléchargées en même temps (fenêtre glissante)
-local GLOBAL_CAP  = 32    -- plafond de sous-processus, tous chapitres confondus
+local WAVE        = 4     -- images téléchargées en même temps (fenêtre glissante)
+local GLOBAL_CAP  = 6     -- plafond de sous-processus, tous chapitres confondus
 local JOB_TIMEOUT = 40    -- secondes max par image (2 essais de 20 s) avant arrêt de la tâche
 local TRY_TIMEOUT = 15    -- secondes max par essai (une connexion qui traîne est relancée vite)
 local TOTAL_TIMEOUT = 1200 -- secondes max pour tout un chapitre
@@ -188,7 +188,7 @@ end
 -- Télécharge les `todo` (liste d'indices) avec `wave_size` images en cours en permanence
 -- (dès qu'une finit, la suivante démarre : on n'attend plus la plus lente d'une vague).
 -- done(aborted) : aborted = true si `cancelled()` a coupé la boucle.
-local BATCH_WIDTH = 10   -- connexions simultanées en mode « batch » (plusieurs images par connexion)
+local BATCH_WIDTH = 3    -- connexions simultanées en mode « batch » (plusieurs images par connexion)
 
 local function run_waves(items, todo, on_progress, done_count, total, done, cancelled, wave_size, on_tail, batch, try_timeout, pace)
     wave_size = wave_size or WAVE

@@ -278,6 +278,9 @@ function Browse.globalSearch(term)
 
         local results, failed = {}, 0
         local i, progress = 0, nil
+        -- Le terme ne change pas pendant la recherche : éviter de le
+        -- normaliser à nouveau pour chaque source.
+        local wanted = norm_title(term)
 
         local function finish()
             if progress then UIManager:close(progress); progress = nil end
@@ -323,7 +326,6 @@ function Browse.globalSearch(term)
                         -- Recherche globale : uniquement les titres EXACTEMENT
                         -- égaux au terme saisi (ex. « shadow slave » ne ramène
                         -- pas « shadow »… et inversement).
-                        local wanted = norm_title(term)
                         local kept = 0
                         for n = 1, #novels do
                             local nv = novels[n]

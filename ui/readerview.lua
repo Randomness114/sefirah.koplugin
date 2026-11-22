@@ -27,6 +27,7 @@ local Screen            = Device.screen
 local Blitbuffer        = require("ffi/blitbuffer")
 local FrameContainer    = require("ui/widget/container/framecontainer")
 local CenterContainer   = require("ui/widget/container/centercontainer")
+local LeftContainer     = require("ui/widget/container/leftcontainer")
 local HorizontalGroup   = require("ui/widget/horizontalgroup")
 local HorizontalSpan    = require("ui/widget/horizontalspan")
 local VerticalGroup     = require("ui/widget/verticalgroup")
@@ -558,6 +559,36 @@ local function text_margin()
     return WIDTH_PRESETS[_width_idx].margin
 end
 
+-- ── Marges (haut et bas du bloc de texte) ───────────────────────────────────
+-- « Largeur » règle déjà les marges gauche/droite ; « Marges » règle l'espace
+-- au-dessus et au-dessous du texte. « Petites » = 0 = rendu d'avant ce réglage,
+-- donc rien ne bouge tant qu'on n'y touche pas. Le choix est mémorisé dans les
+-- réglages de Sefirah (clé reader_margins_idx), pas dans ceux de KOReader.
+local MARGIN_PRESETS = {
+    { label = T("Petites"),  value = 0 },
+    { label = T("Moyennes"), value = Screen:scaleBySize(12) },
+    { label = T("Grandes"),  value = Screen:scaleBySize(28) },
+}
+
+local function margins_idx()
+    local i = tonumber(Settings:get("reader_margins_idx"))
+    if i and MARGIN_PRESETS[i] then return i end
+    return 1
+end
+
+local function text_vmargin()
+    return MARGIN_PRESETS[margins_idx()].value
+end
+
+-- Pousse le bloc de texte vers le bas de la marge du haut. Les icônes de
+-- commentaires sont positionnées par rapport au bloc (OverlapGroup), pas à
+-- l'écran : elles suivent donc le décalage sans rien recalculer.
+local function with_vmargin(widget)
+    local vm = text_vmargin()
+    if vm <= 0 then return widget end
+    return VerticalGroup:new{ align = "left", P.spacer(vm), widget }
+end
+
 -- ── Persistance des réglages (survit à un redémarrage de l'appareil) ────────
 -- Utilise G_reader_settings, le magasin de réglages GLOBAL de KOReader (déjà
 -- initialisé par reader.lua au démarrage, sérialisé dans
@@ -981,82 +1012,146 @@ local function make_title_row(title)
     }
 end
 
--- ── Cartes arrondies du panneau Réglages (icône · libellé centré · chevrons) ──
+-- ── Écran « Paramètres » du lecteur : en-tête, lignes à icône, interrupteur ──
 local _RS_ROOT = (debug.getinfo(1, "S").source:match("^@(.*)/ui/[^/]*$")) or "."
 
+-- Pictogrammes resources/rs_<nom>.png : noir sur blanc, opaques, comme les
+-- resources/set_*.png de l'écran Paramètres de Sefirah. Le mode nuit inverse
+-- tout l'écran (core/night.lua) : un seul jeu d'icônes suffit, il s'inverse avec
+-- le reste (original_in_nightmode = false).
 local function rs_icon(name)
-    local suffix = _night_mode and "_n" or ""
-    return _RS_ROOT .. "/resources/rs_" .. name .. suffix .. ".png"
+    return _RS_ROOT .. "/resources/rs_" .. name .. ".png"
 end
 
-local function make_settings_card(opts)
-    local margin  = Screen:scaleBySize(12)
-    local border  = Screen:scaleBySize(1)
-    local H       = NAV_BTN_H
-    local gap     = Screen:scaleBySize(6)
-    local inner_w = P.W - 2 * margin - 2 * border
-    local face    = Font:getFace("cfont", 20)
+-- Image d'icône. Si le fichier manque, on laisse un vide de la même taille :
+-- ImageWidget afficherait sinon un carré gris plein, qu'on prend à tort pour une icône.
+local function rs_image(name, size)
+    local path = rs_icon(name)
+    local ok_l, lfs = pcall(require, "libs/libkoreader-lfs")
+    if ok_l and lfs and lfs.attributes(path, "mode") ~= "file" then
+        pcall(function() require("logger").warn("Sefirah : icône introuvable", path) end)
+        return CenterContainer:new{ dimen = Geom:new{ w = size, h = size }, HorizontalSpan:new{ width = 1 } }
+    end
+    return ImageWidget:new{
+        file = path, width = size, height = size,
+        scale_factor = 0, original_in_nightmode = false,
+    }
+end
 
-    local function zone(w, child, cb)
+-- En-tête : « < » à gauche, titre centré, « × » à droite. Zones tactiles ≥ 48 px.
+local function make_settings_header(title, on_back, on_close)
+    local H     = math.max(P.TITLE_H, 48)
+    local btn_w = math.max(Screen:scaleBySize(64), 48)
+    local icon  = Screen:scaleBySize(26)
+    local title_w = P.W - 2 * btn_w
+
+    local function btn(name, cb)
         local f = FrameContainer:new{
-            bordersize = 0, padding = 0, background = bg_color(),
-            CenterContainer:new{ dimen = Geom:new{ w = w, h = H }, child },
+            bordersize = 0, padding = 0, margin = 0, background = bg_color(),
+            CenterContainer:new{ dimen = Geom:new{ w = btn_w, h = H }, rs_image(name, icon) },
+        }
+        return P.wrapTappable(f, cb)
+    end
+    local title_frame = FrameContainer:new{
+        bordersize = 0, padding = 0, margin = 0, background = bg_color(),
+        CenterContainer:new{
+            dimen = Geom:new{ w = title_w, h = H },
+            TextWidget:new{
+                text = title, face = Font:getFace("cfont", 22), bold = true,
+                fgcolor = fg_color(), max_width = title_w - Screen:scaleBySize(8),
+            },
+        },
+    }
+    return HorizontalGroup:new{ btn("back", on_back), title_frame, btn("close", on_close) }
+end
+
+-- Interrupteur dessiné avec des widgets simples (aucune image) : pastille
+-- arrondie + rond mobile. Éteint = contour seul, rond à gauche ; allumé =
+-- pastille pleine, rond à droite. Noir et blanc uniquement.
+local function make_switch(is_on)
+    local bd   = math.max(2, Screen:scaleBySize(2))
+    local sw_w = Screen:scaleBySize(48)
+    local sw_h = Screen:scaleBySize(26)
+    local pad  = Screen:scaleBySize(3)
+    local ks   = sw_h - 2 * pad                 -- diamètre du rond (bordure comprise)
+
+    local function box(w, h, background)
+        return FrameContainer:new{
+            bordersize = bd, radius = math.floor(math.min(w, h) / 2),
+            padding = 0, margin = 0, color = fg_color(), background = background,
+            CenterContainer:new{
+                dimen = Geom:new{ w = w - 2 * bd, h = h - 2 * bd },
+                HorizontalSpan:new{ width = 1 },
+            },
+        }
+    end
+    local pill = box(sw_w, sw_h, is_on and fg_color() or bg_color())
+    local knob = box(ks, ks, bg_color())
+    knob.overlap_offset = { is_on and (sw_w - pad - ks) or pad, pad }
+    return OverlapGroup:new{ dimen = Geom:new{ w = sw_w, h = sw_h }, pill, knob }
+end
+
+-- Ligne : icône · libellé (aligné à gauche) · élément de droite.
+-- opts.right : "chevron" (défaut), "stepper" (− / +) ou "switch".
+-- Hauteur identique partout, séparateur gris fin ajouté par l'appelant.
+-- Les 8 lignes se partagent toute la hauteur sous l'en-tête (7 séparateurs entre elles),
+-- pour que l'écran soit rempli jusqu'en bas ; jamais sous 48 px.
+local SETTINGS_ROWS = 8
+local SETTINGS_ROW_H = math.max(48, math.floor((P.SUB_H - (SETTINGS_ROWS - 1) * P.HAIRLINE) / SETTINGS_ROWS))
+
+local function make_settings_row(opts)
+    local side    = P.MARGIN
+    local H       = SETTINGS_ROW_H
+    local icon_w  = Screen:scaleBySize(52)
+    local icon_sz = Screen:scaleBySize(30)
+    local step_w  = math.max(Screen:scaleBySize(56), 48)
+    local right   = opts.right or "chevron"
+    local right_w = (right == "stepper") and 2 * step_w
+        or (right == "switch") and Screen:scaleBySize(64)
+        or math.max(Screen:scaleBySize(48), 48)
+    local label_w = P.W - 2 * side - icon_w - right_w
+
+    local function zone(w, child, cb, left_aligned)
+        local box = left_aligned and LeftContainer or CenterContainer
+        local f = FrameContainer:new{
+            bordersize = 0, padding = 0, margin = 0, background = bg_color(),
+            box:new{ dimen = Geom:new{ w = w, h = H }, child },
         }
         return cb and P.wrapTappable(f, cb) or f
     end
 
-    local function chevron(txt)
-        return TextWidget:new{ text = txt, face = Font:getFace("cfont", 26), fgcolor = fg_color() }
-    end
-
-    local row
-    if opts.header then
-        row = zone(inner_w, TextWidget:new{
-            text = opts.label, face = Font:getFace("cfont", 21), bold = true, fgcolor = fg_color(),
-            max_width = inner_w - 2 * margin,
-        }, opts.on_tap)
+    local right_widget
+    if right == "stepper" then
+        right_widget = HorizontalGroup:new{
+            zone(step_w, rs_image("minus", Screen:scaleBySize(24)), opts.on_minus),
+            zone(step_w, rs_image("plus",  Screen:scaleBySize(24)), opts.on_plus),
+        }
+    elseif right == "switch" then
+        right_widget = zone(right_w, make_switch(opts.switch_on == true), opts.on_tap)
     else
-        local icon_w  = Screen:scaleBySize(64)
-        local chev_w  = opts.on_prev and Screen:scaleBySize(100) or Screen:scaleBySize(56)
-        local label_w = inner_w - icon_w - chev_w
-        local icon = ImageWidget:new{
-            file = rs_icon(opts.icon), alpha = true, scale_factor = 0,
-            width = Screen:scaleBySize(28), height = Screen:scaleBySize(28),
-            -- Mode nuit = inversion de tout l'écran (core/night.lua) : l'icône
-            -- noire doit s'inverser avec lui (→ blanche). Avec la valeur par
-            -- défaut (true), KOReader la ré-inverse et elle reste noire sur noir.
-            original_in_nightmode = false,
-        }
-        local label = TextWidget:new{
-            text = opts.label, face = face, fgcolor = fg_color(),
-            max_width = label_w - gap,
-        }
-        local chevrons
-        if opts.on_prev then
-            local half = math.floor(chev_w / 2)
-            chevrons = HorizontalGroup:new{
-                zone(half, chevron("‹"), opts.on_prev),
-                zone(chev_w - half, chevron("›"), opts.on_next),
-            }
-        else
-            chevrons = zone(chev_w, chevron("›"), opts.on_next)
-        end
-        row = HorizontalGroup:new{
-            zone(icon_w, icon, opts.on_next),
-            zone(label_w, label, opts.on_next),
-            chevrons,
-        }
+        right_widget = zone(right_w, rs_image("chevron", Screen:scaleBySize(22)), opts.on_tap)
     end
 
-    local card = FrameContainer:new{
-        bordersize = border, radius = Screen:scaleBySize(10), padding = 0, margin = 0,
-        color = Blitbuffer.COLOR_GRAY, background = bg_color(),
-        row,
-    }
     return HorizontalGroup:new{
-        HorizontalSpan:new{ width = margin },
-        card,
-        HorizontalSpan:new{ width = margin },
+        HorizontalSpan:new{ width = side },
+        zone(icon_w, rs_image(opts.icon, icon_sz), opts.on_tap),
+        zone(label_w, TextWidget:new{
+            text = opts.label, face = Font:getFace("cfont", 20), fgcolor = fg_color(),
+            max_width = label_w - Screen:scaleBySize(8),
+        }, opts.on_tap, true),
+        right_widget,
+        HorizontalSpan:new{ width = side },
+    }
+end
+
+-- Séparateur gris fin, en retrait des deux côtés.
+local function make_settings_separator()
+    return HorizontalGroup:new{
+        HorizontalSpan:new{ width = P.MARGIN },
+        LineWidget:new{
+            background = Blitbuffer.COLOR_GRAY,
+            dimen = Geom:new{ w = P.W - 2 * P.MARGIN, h = P.HAIRLINE },
+        },
     }
 end
 
@@ -1291,6 +1386,32 @@ local function find_comment_mark_charpos(text, needle, from_byte)
     return nil
 end
 
+-- Recherche la ligne contenant une position de caractère.
+-- vertical_string_list est ordonnée par offset : une recherche binaire évite
+-- de reparcourir toutes les lignes pour chaque commentaire à chaque refresh.
+local function find_line_for_charpos(vsl, charpos)
+    local lo, hi = 1, #vsl
+    local best = nil
+    while lo <= hi do
+        local mid = math.floor((lo + hi) / 2)
+        local candidate = vsl[mid]
+        local offset = candidate and candidate.offset
+        if offset and offset <= charpos then
+            best = mid
+            lo = mid + 1
+        else
+            hi = mid - 1
+        end
+    end
+
+    if not best then return nil end
+    local candidate = vsl[best]
+    if candidate and (not candidate.end_offset or charpos <= candidate.end_offset + 1) then
+        return best
+    end
+    return nil
+end
+
 local function build_comment_overlays(scroll_widget, marks)
     if not scroll_widget or not scroll_widget.text_widget or not marks or #marks == 0 then
         return nil, function() end
@@ -1445,14 +1566,7 @@ local function build_comment_overlays(scroll_widget, marks)
         local safety_gap = Screen:scaleBySize(4)
 
         for _, item in ipairs(positions) do
-            local line_num
-            for ln, candidate in ipairs(vsl) do
-                if candidate.offset and item.charpos >= candidate.offset
-                        and (not candidate.end_offset or item.charpos <= candidate.end_offset + 1) then
-                    line_num = ln
-                    break
-                end
-            end
+            local line_num = find_line_for_charpos(vsl, item.charpos)
 
             local placed = false
             if line_num and line_num >= current_line and line_num < current_line + lines_per_page then
@@ -1572,14 +1686,7 @@ local function build_avatar_overlays(scroll_widget, avatar_marks)
         local vsl = text_widget.vertical_string_list or {}
 
         for _, item in ipairs(positions) do
-            local line_num
-            for ln, candidate in ipairs(vsl) do
-                if candidate.offset and item.charpos >= candidate.offset
-                        and (not candidate.end_offset or item.charpos <= candidate.end_offset + 1) then
-                    line_num = ln
-                    break
-                end
-            end
+            local line_num = find_line_for_charpos(vsl, item.charpos)
 
             -- À GAUCHE du pseudo : toujours calée sur le bord gauche de la
             -- colonne de texte (novelfrance.lua réserve la place avec des
@@ -1751,7 +1858,7 @@ local function open_index(index, resume, force_flash)
             text   = text,
             face   = Font:getFace(FONT_FACES[_font_face_idx].id, _font_size),
             width  = P.W - 2 * text_margin(),
-            height = reader_text_area_h() - NOVEL_TITLE_ROW_H, -- réserve pour la bande "titre du roman" (make_novel_title_row) ET le surplus de titre multi-lignes
+            height = reader_text_area_h() - NOVEL_TITLE_ROW_H - 2 * text_vmargin(), -- réserve pour la bande "titre du roman" (make_novel_title_row) ET le surplus de titre multi-lignes
             fgcolor = fg_color(),
             -- Reprise : si une page a été enregistrée, on repart volontairement
             -- de la page 1 puis on rejoue les tours de page AVANT que KOReader
@@ -1861,7 +1968,7 @@ local function open_index(index, resume, force_flash)
             align = "left",
             make_title_row(title),
             P.hairline(),
-            P.contentFrame({ text_overlay }, reader_text_area_h()),
+            P.contentFrame({ with_vmargin(text_overlay) }, reader_text_area_h()),
             make_page_indicator(cur_page, total_pages, _chapter_marks, on_tap_comments),
             make_nav_row(index, #_ctx.chapters),
         }
@@ -2052,22 +2159,27 @@ local function open_index(index, resume, force_flash)
         if not want_tr then return render_raw(html) end
         local cached = Cache.getTranslation(_ctx.source_id, novel_path, key, Translate.lang())
         if cached then return render_raw(Translate.fix(cached)) end
+        local my_ctx, my_index, my_source = _ctx, _ctx.index, _ctx.source_id
         Online.run(function()
             local loading = InfoMessage:new{
                 text = T("Traduction du chapitre…") }
             UIManager:show(loading)
             UIManager:scheduleIn(0.1, function()
-                local ok, tr, err = pcall(Translate.chapter, html, _ctx.source_id, novel_path, key)
-                UIManager:close(loading)
-                if ok and tr then
-                    render_raw(tr)
-                else
-                    UIManager:show(InfoMessage:new{
-                        text = T("Traduction impossible : ") .. tostring(ok and err or tr),
-                        timeout = 5,
-                    })
-                    render_raw(html)
-                end
+                -- Traduction en arrière-plan (sous-processus) : l'écran ne gèle plus.
+                Translate.chapterAsync(html, my_source, novel_path, key, function(tr, err)
+                    UIManager:close(loading)
+                    -- Lecteur fermé ou autre chapitre ouvert entre-temps : on n'affiche rien.
+                    if not _ctx or _ctx ~= my_ctx or _ctx.index ~= my_index then return end
+                    if tr then
+                        render_raw(tr)
+                    else
+                        UIManager:show(InfoMessage:new{
+                            text = T("Traduction impossible : ") .. tostring(err),
+                            timeout = 5,
+                        })
+                        render_raw(html)
+                    end
+                end)
             end)
         end)
     end
@@ -2185,7 +2297,7 @@ refresh_page_indicator = function()
         align = "left",
         make_title_row(title),
         P.hairline(),
-        P.contentFrame({ text_overlay }, reader_text_area_h()),
+        P.contentFrame({ with_vmargin(text_overlay) }, reader_text_area_h()),
         make_page_indicator(cur_page, total_pages, _chapter_marks, on_tap_comments),
         make_nav_row(_ctx.index, #_ctx.chapters),
     }
@@ -2208,9 +2320,9 @@ do
                 align = "left",
                 make_title_row(title),
                 P.hairline(),
-                P.contentFrame({ HorizontalGroup:new{
+                P.contentFrame({ with_vmargin(HorizontalGroup:new{
                     HorizontalSpan:new{ width = text_margin() }, _scroll_w,
-                    HorizontalSpan:new{ width = text_margin() } } }, reader_text_area_h()),
+                    HorizontalSpan:new{ width = text_margin() } }) }, reader_text_area_h()),
                 make_page_indicator(cur_page, total_pages, nil, nil),
                 make_nav_row(_ctx.index, #_ctx.chapters),
             }
@@ -2310,15 +2422,36 @@ local function build_settings_body()
         save_reader_settings()
         ReaderView.openSettings()
     end
-    local function cycle_line_spacing(delta)
-        _line_spacing_idx = ((_line_spacing_idx - 1 + delta) % #LINE_SPACING_PRESETS) + 1
-        save_reader_settings()
-        ReaderView.openSettings()
-    end
-    local function cycle_width(delta)
-        _width_idx = ((_width_idx - 1 + delta) % #WIDTH_PRESETS) + 1
-        save_reader_settings()
-        ReaderView.openSettings()
+
+    -- Liste de choix plein écran (même mécanique que la liste des polices).
+    -- Le choix est appliqué puis l'écran Paramètres est réaffiché ; le chapitre
+    -- n'est reconstruit qu'au retour (closeSettings), comme avant.
+    local function open_choice_list(title, presets, current, on_pick)
+        local choice_menu
+        local items = {}
+        for i, preset in ipairs(presets) do
+            table.insert(items, {
+                text = preset.label,
+                bold = (i == current),
+                mandatory = (i == current) and "•" or nil,
+                callback = function()
+                    if choice_menu then UIManager:close(choice_menu) end
+                    UIManager:nextTick(function() on_pick(i) end)
+                end,
+            })
+        end
+        items.current = current
+        choice_menu = Menu:new{
+            title = title,
+            item_table = items,
+            items_font_size = 22,
+            is_popout = false,
+            is_borderless = true,
+            width = Screen:getWidth(),
+            height = Screen:getHeight(),
+            close_callback = function() end,
+        }
+        UIManager:show(choice_menu)
     end
 
     local function openFontList()
@@ -2378,68 +2511,81 @@ local function build_settings_body()
         UIManager:show(font_menu)
     end
 
-    local face_row = make_settings_card{
-        header = true,
-        label  = T("Police : ") .. FONT_FACES[_font_face_idx].label,
-        on_tap = openFontList,
+    local night_on = require("core.night").enabled()
+    local rows = {
+        make_settings_row{
+            icon = "font", label = T("Police : ") .. FONT_FACES[_font_face_idx].label,
+            on_tap = openFontList,
+        },
+        make_settings_row{
+            icon = "size", label = T("Taille : ") .. tostring(_font_size), right = "stepper",
+            on_minus = function() change_size(-FONT_SIZE_STEP) end,
+            on_plus  = function() change_size(FONT_SIZE_STEP) end,
+        },
+        make_settings_row{
+            icon = "spacing", label = T("Interligne : ") .. LINE_SPACING_PRESETS[_line_spacing_idx].label,
+            on_tap = function()
+                open_choice_list(T("Interligne"), LINE_SPACING_PRESETS, _line_spacing_idx, function(i)
+                    _line_spacing_idx = i
+                    save_reader_settings()
+                    ReaderView.openSettings()
+                end)
+            end,
+        },
+        make_settings_row{
+            icon = "width", label = T("Largeur : ") .. WIDTH_PRESETS[_width_idx].label,
+            on_tap = function()
+                open_choice_list(T("Largeur"), WIDTH_PRESETS, _width_idx, function(i)
+                    _width_idx = i
+                    save_reader_settings()
+                    ReaderView.openSettings()
+                end)
+            end,
+        },
+        make_settings_row{
+            icon = "margins", label = T("Marges : ") .. MARGIN_PRESETS[margins_idx()].label,
+            on_tap = function()
+                open_choice_list(T("Marges"), MARGIN_PRESETS, margins_idx(), function(i)
+                    Settings:set("reader_margins_idx", i)
+                    ReaderView.openSettings()
+                end)
+            end,
+        },
+        make_settings_row{
+            icon = "dict", label = T("Dictionnaire"),
+            on_tap = function() ReaderView.openDictionary() end,
+        },
+        make_settings_row{
+            icon = "title",
+            label = T("Titre du chapitre : ") .. (title_hidden() and T("MASQUÉ") or T("AFFICHÉ")),
+            on_tap = function()
+                Settings:set("reader_hide_title", not title_hidden())
+                Settings:set("reader_hide_title_asked", true)
+                ReaderView.openSettings(true)
+            end,
+        },
+        make_settings_row{
+            icon = "night", right = "switch", switch_on = night_on,
+            label = T("Mode nuit : ") .. (night_on and T("ACTIVÉ") or T("DÉSACTIVÉ")),
+            on_tap = function()
+                require("core.night").toggle()
+                ReaderView.openSettings(true)
+            end,
+        },
     }
-    local size_row = make_settings_card{
-        icon = "size", label = T("Taille : ") .. tostring(_font_size),
-        on_prev = function() change_size(-FONT_SIZE_STEP) end,
-        on_next = function() change_size(FONT_SIZE_STEP) end,
-    }
-    local line_spacing_row = make_settings_card{
-        icon = "spacing", label = T("Interligne : ") .. LINE_SPACING_PRESETS[_line_spacing_idx].label,
-        on_prev = function() cycle_line_spacing(-1) end,
-        on_next = function() cycle_line_spacing(1) end,
-    }
-    local width_row = make_settings_card{
-        icon = "width", label = T("Largeur : ") .. WIDTH_PRESETS[_width_idx].label,
-        on_prev = function() cycle_width(-1) end,
-        on_next = function() cycle_width(1) end,
-    }
-    local dict_btn = make_settings_card{
-        icon = "dict", label = T("Dictionnaire"),
-        on_next = function() ReaderView.openDictionary() end,
-    }
-    local night_row = make_settings_card{
-        header = true,
-        label  = T("Mode nuit : ") .. (require("core.night").enabled() and T("ACTIVÉ") or T("DÉSACTIVÉ")),
-        on_tap = function()
-            require("core.night").toggle()
-            ReaderView.openSettings(true)
-        end,
-    }
-    local title_toggle_row = make_settings_card{
-        header = true,
-        label  = T("Titre du chapitre : ") .. (title_hidden() and T("MASQUÉ") or T("AFFICHÉ")),
-        on_tap = function()
-            Settings:set("reader_hide_title", not title_hidden())
-            Settings:set("reader_hide_title_asked", true)
-            ReaderView.openSettings(true)
-        end,
-    }
-    local function gap() return P.spacer(Screen:scaleBySize(8)) end
 
-    return VerticalGroup:new{
+    local body = VerticalGroup:new{
         align = "left",
-        make_reader_title_bar(T("Réglages de lecture"), function() ReaderView.closeSettings() end, true),
+        make_settings_header(T("Paramètres"),
+            function() ReaderView.closeSettings() end,
+            function() ReaderView.closeSettings() end),
         P.hairline(),
-        gap(),
-        face_row,
-        gap(),
-        size_row,
-        gap(),
-        line_spacing_row,
-        gap(),
-        width_row,
-        gap(),
-        dict_btn,
-        gap(),
-        title_toggle_row,
-        gap(),
-        night_row,
     }
+    for i, row in ipairs(rows) do
+        table.insert(body, row)
+        if i < #rows then table.insert(body, make_settings_separator()) end
+    end
+    return body
 end
 
 -- ── Dictionnaire ──────────────────────────────────────────────────────────

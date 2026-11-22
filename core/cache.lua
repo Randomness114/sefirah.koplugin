@@ -28,12 +28,34 @@ local function ensure_dirs()
     if lfs.attributes(content_dir, "mode") ~= "directory" then lfs.mkdir(content_dir) end
 end
 
+-- Un nom de fichier ne doit pas dépasser 255 octets (Kobo : FAT32). Chaque octet non
+-- alphanumérique devient « _ » : les liens arabes (2 octets par lettre, ex. noms de volumes
+-- de Reverend Insanity / TBATE) dépassaient la limite -> « error write ». Au-delà de
+-- MAX_PART on coupe et on ajoute un hash du texte complet (les noms courts restent inchangés,
+-- donc les chapitres déjà téléchargés sont toujours retrouvés).
+local MAX_PART = 90
+local function short_hash(s)
+    local h1, h2 = 5381, 52711
+    for i = 1, #s do
+        local c = s:byte(i)
+        h1 = (h1 * 33 + c) % 4294967296
+        h2 = (h2 * 31 + c) % 4294967296
+    end
+    return string.format("%08x%08x", h1, h2)
+end
+local function fit(raw, max)
+    max = max or MAX_PART
+    local t = (raw or ""):gsub("[^%w%-]", "_")
+    if #t <= max then return t end
+    return t:sub(1, max - 17) .. "_" .. short_hash(raw)
+end
+
 local function novel_key(source_id, novel_path)
-    return (source_id .. "__" .. novel_path):gsub("[^%w%-]", "_")
+    return fit(source_id .. "__" .. novel_path, 110)
 end
 
 local function chapter_slug(chapter_path)
-    return (chapter_path or ""):gsub("[^%w%-]", "_")
+    return fit(chapter_path)
 end
 
 local function content_path(source_id, novel_path, chapter_path)
@@ -246,12 +268,55 @@ end
 -- pour que même un chapitre non explicitement "téléchargé" (juste lu en
 -- ligne) garde ses commentaires déjà vus disponibles hors-ligne ensuite.
 
+-- Petit cache LRU en mémoire : la vue lecteur peut demander les commentaires
+-- de nombreux paragraphes du même chapitre. Sans cela, chaque demande relisait
+-- et décodait le même JSON depuis le stockage de la liseuse.
+local COMMENTS_CACHE_LIMIT = 12
+local _comments_cache = {}
+local _comments_lru = {}
+
+local function remember_comments(path, data)
+    _comments_cache[path] = data
+    for i = #_comments_lru, 1, -1 do
+        if _comments_lru[i] == path then
+            table.remove(_comments_lru, i)
+            break
+        end
+    end
+    _comments_lru[#_comments_lru + 1] = path
+    while #_comments_lru > COMMENTS_CACHE_LIMIT do
+        local oldest = table.remove(_comments_lru, 1)
+        _comments_cache[oldest] = nil
+    end
+end
+
+local function forget_comments(path)
+    _comments_cache[path] = nil
+    for i = #_comments_lru, 1, -1 do
+        if _comments_lru[i] == path then
+            table.remove(_comments_lru, i)
+            break
+        end
+    end
+end
+
 local function read_comments_file(source_id, novel_path, chapter_path)
-    local f = io.open(comments_path(source_id, novel_path, chapter_path), "r")
-    if not f then return {} end
+    local path = comments_path(source_id, novel_path, chapter_path)
+    local cached = _comments_cache[path]
+    if cached then
+        remember_comments(path, cached) -- rafraîchit sa position LRU
+        return cached
+    end
+    local f = io.open(path, "r")
+    if not f then
+        local empty = {}
+        remember_comments(path, empty)
+        return empty
+    end
     local raw = f:read("*all"); f:close()
     local ok, data = pcall(JSON.decode, raw)
-    if not ok or type(data) ~= "table" then return {} end
+    if not ok or type(data) ~= "table" then data = {} end
+    remember_comments(path, data)
     return data
 end
 
@@ -259,10 +324,13 @@ local function write_comments_file(source_id, novel_path, chapter_path, by_parag
     ensure_dirs()
     local ok_enc, encoded = pcall(JSON.encode, by_paragraph)
     if not ok_enc then return false end
-    local f = io.open(comments_path(source_id, novel_path, chapter_path), "w")
+    local path = comments_path(source_id, novel_path, chapter_path)
+    local f = io.open(path, "w")
     if not f then return false end
-    f:write(encoded)
+    local ok_write = pcall(function() f:write(encoded) end)
     f:close()
+    if not ok_write then return false end
+    remember_comments(path, by_paragraph)
     return true
 end
 
@@ -339,7 +407,9 @@ function Cache.removeNovel(source_id, novel_path)
     if not e then return end
     for cp in pairs(e.chapters) do
         os.remove(content_path(source_id, novel_path, cp))
-        os.remove(comments_path(source_id, novel_path, cp))
+        local cpath = comments_path(source_id, novel_path, cp)
+        os.remove(cpath)
+        forget_comments(cpath)
     end
     local data = load_summary()
     data.novels[novel_key(source_id, novel_path)] = nil
@@ -355,7 +425,9 @@ function Cache.purgeSource(source_id)
         if e.source_id == source_id then
             for cp in pairs(e.chapters or {}) do
                 os.remove(content_path(source_id, e.novel_path, cp))
-                os.remove(comments_path(source_id, e.novel_path, cp))
+                local cpath = comments_path(source_id, e.novel_path, cp)
+                os.remove(cpath)
+                forget_comments(cpath)
                 pcall(Cache.removeAllTranslations, source_id, e.novel_path, cp)
                 n = n + 1
             end
@@ -576,11 +648,21 @@ local PAR_WIDTH_DEFAULT = 5
 local PAR_WIDTH = { ao3 = 1, lightnovelvf = 1, mydramanovel = 2, wordrain = 2, wattpad = 2, novelfrance = 1 }
 local PAR_JOB_TIMEOUT = 60      -- un chapitre trop lent est arrêté (puis réessayé en séquentiel)
 local PAR_TOTAL_TIMEOUT = 600
+-- Avec traduction automatique : la traduction se fait dans le sous-processus, donc plus lente.
+local PAR_TR_JOB_TIMEOUT = 600
+local PAR_TR_TOTAL_TIMEOUT = 1800
+
+-- Contexte de traduction pour un téléchargement (nil si la traduction auto est désactivée).
+local function translate_ctx(source_id, novel_path, key)
+    local okT, Tr = pcall(require, "core.translate")
+    if not okT or not Tr.enabled() then return nil end
+    return { source_id = source_id, novel_path = novel_path, key = key }
+end
 
 -- Tâche exécutée DANS un sous-processus : télécharge un chapitre et l'écrit sur disque
 -- (fichier .part puis renommage : jamais de chapitre tronqué). Le processus principal
 -- (interface) n'attend donc jamais le réseau.
-local function make_fetch_job(ext, ref, dest)
+local function make_fetch_job(ext, ref, dest, tr)
     return function()
         for _ = 1, CHAPTER_FETCH_ATTEMPTS do
             local ok, html = pcall(ext.parseChapter, ext, ref)
@@ -591,6 +673,14 @@ local function make_fetch_job(ext, ref, dest)
                     f:write(html)
                     f:close()
                     os.rename(part, dest)
+                end
+                -- Traduction auto : faite ICI, dans le sous-processus, après l'écriture du chapitre.
+                -- L'interface n'a plus jamais à traduire pendant la lecture. Un échec de
+                -- traduction ne fait pas échouer le téléchargement (le texte original reste).
+                if tr then
+                    pcall(function()
+                        require("core.translate").chapter(html, tr.source_id, tr.novel_path, tr.key)
+                    end)
                 end
                 return
             end
@@ -623,8 +713,10 @@ function Cache.downloadChapterAsync(ext, source_id, novel_path, chapter, on_done
         end
         on_done(false, "download_failed")   -- pas de nouvel essai bloquant : l'appelant décide
     end
-    if not Parallel.pool({ make_fetch_job(ext, ref, dest) }, 1, after,
-            { job_timeout = PAR_JOB_TIMEOUT, timeout = PAR_JOB_TIMEOUT + 10 }) then
+    local tr = translate_ctx(source_id, novel_path, key)
+    local jt = tr and PAR_TR_JOB_TIMEOUT or PAR_JOB_TIMEOUT
+    if not Parallel.pool({ make_fetch_job(ext, ref, dest, tr) }, 1, after,
+            { job_timeout = jt, timeout = jt + 10 }) then
         return Cache.downloadChapter(ext, source_id, novel_path, chapter, on_done)
     end
 end
@@ -673,7 +765,7 @@ function Cache.downloadChapters(ext, source_id, novel_path, chapters, on_progres
         local batch, need, before = {}, {}, {}
         -- Fenêtre glissante dans le lot : le lot ne sert qu'à enregistrer les chapitres reçus.
         for j = i + 1, math.min(total, i + width * 3) do batch[#batch + 1] = chapters[j] end
-        local jobs, pooled = {}, false
+        local jobs, pooled, any_tr = {}, false, false
         for _, ch in ipairs(batch) do
             local key = ch_key(ch)
             local ref = ch_source_ref(ch)
@@ -681,7 +773,9 @@ function Cache.downloadChapters(ext, source_id, novel_path, chapters, on_progres
                 local dest = content_path(source_id, novel_path, key)
                 need[key] = true
                 before[key] = lfs.attributes(dest, "modification")
-                jobs[#jobs + 1] = make_fetch_job(ext, ref, dest)
+                local tr = translate_ctx(source_id, novel_path, key)
+                if tr then any_tr = true end
+                jobs[#jobs + 1] = make_fetch_job(ext, ref, dest, tr)
             end
         end
 
@@ -719,7 +813,8 @@ function Cache.downloadChapters(ext, source_id, novel_path, chapters, on_progres
         if #jobs == 0 then
             after_batch()   -- rien à télécharger dans ce lot
         elseif Parallel.pool(jobs, width, function() pooled = true; after_batch() end,
-                { job_timeout = PAR_JOB_TIMEOUT, timeout = PAR_TOTAL_TIMEOUT }) then
+                { job_timeout = any_tr and PAR_TR_JOB_TIMEOUT or PAR_JOB_TIMEOUT,
+                  timeout = any_tr and PAR_TR_TOTAL_TIMEOUT or PAR_TOTAL_TIMEOUT }) then
             -- en cours en arrière-plan : after_batch est appelé à la fin
         else
             after_batch()   -- parallélisme indisponible : repli synchrone

@@ -19,6 +19,9 @@ local Parallel = {}
 -- de partager un plafond global : on ne dépasse jamais `opts.global_cap`.
 local _active = 0
 
+-- Un intervalle de 250 ms limite les réveils répétés du CPU sur liseuse,
+-- sans rendre la progression visiblement moins réactive.
+
 local function ffiutil()
     local ok, u = pcall(require, "ffi/util")
     if ok and type(u) == "table"
@@ -84,9 +87,9 @@ function Parallel.run(jobs, on_done, timeout)
             kill_and_reap(pids, u)
             return on_done()
         end
-        UIManager:scheduleIn(0.2, poll)
+        UIManager:scheduleIn(0.25, poll)
     end
-    UIManager:scheduleIn(0.2, poll)
+    UIManager:scheduleIn(0.25, poll)
     return true
 end
 
@@ -173,9 +176,9 @@ function Parallel.pool(jobs, width, on_done, opts)
         end
         if #running == 0 and nxt > #jobs then return finish(false) end
         if now - t0 > total_timeout then return finish(false) end
-        UIManager:scheduleIn(0.15, poll)
+        UIManager:scheduleIn(0.25, poll)
     end
-    UIManager:scheduleIn(0.15, poll)
+    UIManager:scheduleIn(0.25, poll)
     return true
 end
 

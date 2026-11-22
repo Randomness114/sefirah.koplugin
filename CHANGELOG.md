@@ -1,3 +1,65 @@
+# Sefirah v1.7
+
+## Français
+
+### Nouveautés
+- **Centre de progression** : quatre onglets (Progression, Quêtes, Classement, Succès). Visite guidée à la première ouverture, rejouable avec le bouton « i ». Pseudo public unique (requis pour apparaître dans le classement), photo de profil choisie depuis la liseuse ou en ligne, podium et lectures récentes.
+- **Succès** : nombreux nouveaux succès liés à la lecture, au rythme et aux jours de lecture.
+- **Réglages de lecture** : nouveau panneau pour la police, la taille, l'interligne, la largeur et les marges (Petites, Moyennes, Grandes). Les réglages sont enregistrés dans KOReader.
+- **Filtres du catalogue** : genres inclus et exclus (mode ET ou OU), années de parution, nombre de chapitres minimum et maximum, statut, tags, traduction officielle, adaptation animée et contenu adulte. Tris supplémentaires : plus vus, populaires de la semaine, récemment ajoutés.
+- **Messages d'erreur plus précis** : traduction (clé manquante, quota atteint, clé refusée) et sources (MangaBall, 69shu, Cenele).
+
+### Sources
+- **Les sources ne sont plus livrées avec le plugin.** Elles s'installent depuis Sefirah Source Hub : onglet Sources › « Actualiser le catalogue » (Wi-Fi requis), puis installer celles voulues. Les sources déjà installées restent utilisables. Sur une liseuse neuve ou hors ligne, la liste reste vide tant que le catalogue n'a pas été actualisé.
+
+### Corrections
+- **Beast Novels** : les chapitres Premium (marqués « ★ 🪙 prix » sur le site) ne sont plus listés. Les libellés « Chapitre N » sont traduits.
+- **Gel lors du changement de chapitre** : la traduction automatique ne tourne plus pendant la lecture. Elle se fait pendant le téléchargement, ou en arrière-plan à l'ouverture. Sans tâche de fond sur l'appareil, le texte original s'affiche avec un message au lieu de geler la liseuse.
+- **Téléchargement par lot des mangas** : les chapitres sont enregistrés en pages d'images (CBZ), comme à la lecture. Avant, la barre avançait sans rien enregistrer.
+- **Export** : correction de l'export avec avis (version 1.6.2, incluse).
+- **Traductions** : messages manquants ajoutés dans toutes les langues.
+
+## English
+
+### New
+- **Progress centre**: four tabs (Progression, Quests, Ranking, Achievements). Guided tour on first opening, replayable with the "i" button. Unique public username (required to appear in the ranking), profile picture chosen from your e-reader or online, podium and recent reads.
+- **Achievements**: many new achievements for reading, pace and reading days.
+- **Reading settings**: new panel for font, size, line spacing, width and margins (Small, Medium, Large). Settings are saved in KOReader.
+- **Catalogue filters**: included and excluded genres (AND or OR mode), publication years, minimum and maximum chapter count, status, tags, official translation, anime adaptation and adult content. Extra sorts: most viewed, popular this week, recently added.
+- **Clearer error messages**: translation (missing key, quota reached, key rejected) and sources (MangaBall, 69shu, Cenele).
+
+### Sources
+- **Sources are no longer bundled with the plugin.** Install them from Sefirah Source Hub: Sources tab › "Refresh catalogue" (Wi-Fi required), then install the ones you want. Sources already installed keep working. On a new or offline e-reader, the list stays empty until the catalogue has been refreshed.
+
+### Fixes
+- **Beast Novels**: Premium chapters (marked "★ 🪙 price" on the site) are no longer listed. "Chapter N" labels are translated.
+- **Freezes when changing chapter**: automatic translation no longer runs while reading. It happens during download, or in the background when a chapter is opened. Without background tasks on the device, the original text is shown with a message instead of freezing.
+- **Manga batch download**: chapters are saved as page images (CBZ), as when reading. Before, the progress bar moved without saving anything.
+- **Export**: fixed export with reviews (version 1.6.2, included).
+- **Translations**: missing messages added in all languages.
+
+---
+
+# Sefirah v1.6.2
+
+## Français
+
+### Corrections
+- **Export avec avis** : correction d'une erreur (`current_api_sort`) qui pouvait survenir au chargement des avis depuis l'export.
+
+### Changements
+- Release allégée : 2 images inutilisées retirées.
+
+## English
+
+### Fixes
+- **Export with reviews**: fixed an error (`current_api_sort`) that could occur when loading reviews from the export screen.
+
+### Changes
+- Lighter release: 2 unused images removed.
+
+---
+
 # Sefirah v1.6.1
 
 ## Français

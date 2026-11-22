@@ -21,6 +21,7 @@ local ButtonTable     = require("ui/widget/buttontable")
 local GestureRange    = require("ui/gesturerange")
 local InputContainer  = require("ui/widget/container/inputcontainer")
 local TextWidget      = require("ui/widget/textwidget")
+local TextBoxWidget   = require("ui/widget/textboxwidget")
 local UIManager       = require("ui/uimanager")
 local VerticalGroup   = require("ui/widget/verticalgroup")
 local VerticalSpan    = require("ui/widget/verticalspan")
@@ -527,6 +528,91 @@ function Pdp.widgetFromBase64(b64, size)
 end
 
 -- Agrandit une pdp (la mienne ou celle d'un autre joueur reçue en base64) avec une légende.
+-- Dernières lectures (les plus récentes d'abord), avec leur couverture lue dans le cache
+-- disque : aucune requête réseau, donc l'ouverture de la fiche reste instantanée.
+local function recent_books(max, cw, ch)
+    local out = {}
+    pcall(function()
+        local DB, Covers = require("core.db"), require("core.covers")
+        local list = {}
+        for _, n in ipairs(DB.getAll()) do
+            if tonumber(n.last_read_at) and n.source_id and n.path then list[#list + 1] = n end
+        end
+        table.sort(list, function(a, b) return a.last_read_at > b.last_read_at end)
+        for k = 1, math.min(max, #list) do
+            local n = list[k]
+            local okc, bb = pcall(Covers.get, n.source_id, n.path, nil, nil, cw, ch)
+            out[#out + 1] = { title = tostring(n.title or ""), bb = okc and bb or nil }
+        end
+    end)
+    return out
+end
+
+-- Fiche de profil : photo + texte, puis les couvertures des dernières lectures en dessous.
+local ProfileCard = InputContainer:extend{ avatar = nil, caption = "", side = 0, recent = nil }
+
+function ProfileCard:init()
+    local SW, SH = Screen:getWidth(), Screen:getHeight()
+    self.dimen = Geom:new{ x = 0, y = 0, w = SW, h = SH }
+    self.ges_events = {
+        Tap   = { GestureRange:new{ ges = "tap",   range = self.dimen } },
+        Swipe = { GestureRange:new{ ges = "swipe", range = self.dimen } },
+    }
+    if Device:hasKeys() then self.key_events = { Close = { { Device.input.group.Back } } } end
+
+    local bw, pad = sc(2), sc(14)
+    local card_w = math.floor(SW * 0.94)
+    local inner = card_w - 2 * bw - 2 * pad
+    local gap = sc(14)
+
+    local rows = VerticalGroup:new{ align = "left" }
+    local text_w = inner
+    local top = HorizontalGroup:new{ align = "center" }
+    if self.avatar then
+        local side = math.min(self.side, math.floor(inner * 0.42))
+        top[#top + 1] = ImageWidget:new{ image = self.avatar, image_disposable = true, width = side, height = side }
+        top[#top + 1] = HorizontalSpan:new{ width = gap }
+        text_w = inner - side - gap
+    end
+    top[#top + 1] = TextBoxWidget:new{ text = self.caption, face = Font:getFace("cfont", 18), width = text_w }
+    rows[#rows + 1] = top
+
+    local n = #self.recent
+    rows[#rows + 1] = VerticalSpan:new{ width = sc(14) }
+    rows[#rows + 1] = TextWidget:new{ text = T("Lectures récentes"), face = Font:getFace("cfont", 16), bold = true, max_width = inner }
+    rows[#rows + 1] = VerticalSpan:new{ width = sc(8) }
+    local cw = math.min(math.floor((inner - 3 * gap) / 4), math.floor(SH * 0.2 / 1.45))
+    local ch = math.floor(cw * 1.45)
+    local row = HorizontalGroup:new{ align = "top" }
+    for k, b in ipairs(self.recent) do
+        local cover
+        if b.bb then
+            cover = ImageWidget:new{ image = b.bb, image_disposable = false, width = b.bb:getWidth(), height = b.bb:getHeight() }
+        else
+            cover = FrameContainer:new{ bordersize = sc(1), margin = 0, padding = 0, background = Blitbuffer.COLOR_WHITE,
+                CenterContainer:new{ dimen = Geom:new{ w = cw - 2 * sc(1), h = ch - 2 * sc(1) },
+                    TextBoxWidget:new{ text = b.title, face = Font:getFace("cfont", 12), width = cw - sc(10), alignment = "center" } } }
+        end
+        local cell = VerticalGroup:new{ align = "center",
+            CenterContainer:new{ dimen = Geom:new{ w = cw, h = ch }, cover },
+            VerticalSpan:new{ width = sc(4) },
+            TextWidget:new{ text = b.title, face = Font:getFace("cfont", 12), max_width = cw },
+        }
+        row[#row + 1] = cell
+        if k < n then row[#row + 1] = HorizontalSpan:new{ width = gap } end
+    end
+    rows[#rows + 1] = row
+
+    self[1] = CenterContainer:new{ dimen = self.dimen,
+        FrameContainer:new{ bordersize = bw, color = Blitbuffer.COLOR_BLACK, radius = sc(10), margin = 0, padding = pad,
+            background = Blitbuffer.COLOR_WHITE, rows } }
+end
+
+function ProfileCard:onShow() UIManager:setDirty(self, function() return "ui", self.dimen end) end
+function ProfileCard:onTap() UIManager:close(self); return true end
+function ProfileCard:onSwipe() UIManager:close(self); return true end
+function ProfileCard:onClose() UIManager:close(self); return true end
+
 function Pdp.showLarge(caption, b64, mine, fallback_file)
     local data
     if mine then
@@ -548,8 +634,26 @@ function Pdp.showLarge(caption, b64, mine, fallback_file)
             if ok and rd then bb = rd end
         end
     end
+
+    -- Mon profil : couvertures de mes dernières lectures sous les stats.
+    if mine then
+        local SW, SH = Screen:getWidth(), Screen:getHeight()
+        local inner = math.floor(SW * 0.94) - sc(4) - sc(28)
+        local cw = math.min(math.floor((inner - 3 * sc(14)) / 4), math.floor(SH * 0.2 / 1.45))
+        local recent = recent_books(4, cw, math.floor(cw * 1.45))
+        if #recent > 0 then
+            UIManager:show(ProfileCard:new{ avatar = bb, side = side, caption = tostring(caption or ""), recent = recent })
+            return
+        end
+    end
+
     local args = { text = tostring(caption or "") }
-    if bb then args.image, args.image_width, args.image_height = bb, side, side end
+    if bb then
+        args.image, args.image_width, args.image_height = bb, side, side
+        -- Sans largeur imposée, InfoMessage donne 2/3 de l'écran au TEXTE en plus de la photo (55 %) :
+        -- l'ensemble dépasse l'écran et un texte long est coupé. On borne le tout à 90 % de la largeur.
+        args.width = math.floor(Screen:getWidth() * 0.9)
+    end
     UIManager:show(InfoMessage:new(args))
 end
 

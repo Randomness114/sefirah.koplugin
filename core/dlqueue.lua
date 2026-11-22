@@ -43,6 +43,7 @@ local NET_RETRY      = 60     -- secondes entre deux contrôles quand le réseau
 local CONNECT_DELAY  = 6      -- laisse la connexion se stabiliser après NetworkConnected
 local INIT_DELAY     = 25     -- reprise après le démarrage de KOReader
 local SLICE_WATCHDOG = 900    -- une tranche qui ne rend jamais la main est abandonnée
+local MANGA_WATCHDOG = 1800   -- un chapitre de manga (toutes ses pages) peut être long
 local SAVE_EVERY     = 20     -- chapitres entre deux écritures du fichier de file
 local KEEP_DONE      = 8      -- tâches terminées gardées dans la liste
 local TOAST_EVERY    = 25     -- une notification de progression tous les N chapitres
@@ -454,6 +455,25 @@ local function finish_slice(job, slice, results)
     end
 end
 
+-- Télécharge UN chapitre de manga en pages d'images (CBZ), comme à la lecture.
+-- Le numéro de chapitre sert au nom du CBZ : il doit correspondre à celui de la lecture,
+-- sinon le chapitre serait téléchargé une seconde fois.
+local function run_manga_chapter(ext, job, ch, on_done)
+    local ok_m, Manga = pcall(require, "core.manga")
+    if not ok_m then return on_done(false, "manga_unavailable") end
+    local idx = tonumber(ch.chapter_number) or 1
+    local title = job.novel_name or job.novel_path
+    local ok, err = pcall(Manga.download, {
+        ext = ext, chapter = ch, novel_title = title, index = idx,
+        is_cancelled = function() return job.cancelled and true or false end,
+        on_done = function(ok_d, value)
+            if ok_d then return on_done(true) end
+            on_done(false, tostring(value or "download_failed"))
+        end,
+    })
+    if not ok then on_done(false, tostring(err)) end
+end
+
 -- ── Boucle principale ────────────────────────────────────────────────────────
 
 step = function()
@@ -485,17 +505,22 @@ step = function()
 
     -- Taille de la tranche : en parallèle, deux « vagues » ; sinon quelques chapitres
     -- d'affilée (l'interface reprend la main entre chaque chapitre).
-    local width = 1
     local Cache = get_cache()
-    local ok_w, w = pcall(Cache.parallelWidth, job.source_id)
-    if ok_w and tonumber(w) then width = tonumber(w) end
-    local ok_p, Parallel = pcall(require, "core.parallel")
-    if setting("offline_comments") or not ok_p or not Parallel.available() then width = 1 end
-    local n = (width > 1) and (width * 2) or 4
-    n = math.min(n, #job.chapters)
-
+    local is_manga = ext.type == "manga" and type(ext.parseChapterImages) == "function"
     local slice = {}
-    for i = 1, n do slice[i] = job.chapters[i] end
+    if is_manga then
+        -- Mangas : un chapitre à la fois (pages d'images), pas de texte.
+        slice[1] = job.chapters[1]
+    else
+        local width = 1
+        local ok_w, w = pcall(Cache.parallelWidth, job.source_id)
+        if ok_w and tonumber(w) then width = tonumber(w) end
+        local ok_p, Parallel = pcall(require, "core.parallel")
+        if setting("offline_comments") or not ok_p or not Parallel.available() then width = 1 end
+        local n = (width > 1) and (width * 2) or 4
+        n = math.min(n, #job.chapters)
+        for i = 1, n do slice[i] = job.chapters[i] end
+    end
 
     _busy = true
     _cur_job = job
@@ -516,18 +541,26 @@ step = function()
     end
 
     -- Garde-fou : une tranche qui ne revient jamais ne doit pas bloquer la file.
-    UIManager:scheduleIn(SLICE_WATCHDOG, function()
+    UIManager:scheduleIn(is_manga and MANGA_WATCHDOG or SLICE_WATCHDOG, function()
         if _busy and _token == my_token then
             logger.warn("Sefirah/Dlq: tranche bloquée, on continue")
             done_cb()
         end
     end)
 
-    local ok_call, call_err = pcall(Cache.downloadChapters, ext, job.source_id, job.novel_path, slice,
-        function(done, _total, ok, err)
-            results[done] = { ok = ok and true or false, err = err }
-        end,
-        done_cb)
+    local ok_call, call_err
+    if is_manga then
+        ok_call, call_err = pcall(run_manga_chapter, ext, job, slice[1], function(ok, err)
+            results[1] = { ok = ok and true or false, err = err }
+            done_cb()
+        end)
+    else
+        ok_call, call_err = pcall(Cache.downloadChapters, ext, job.source_id, job.novel_path, slice,
+            function(done, _total, ok, err)
+                results[done] = { ok = ok and true or false, err = err }
+            end,
+            done_cb)
+    end
     if not ok_call then
         logger.warn("Sefirah/Dlq: downloadChapters :", tostring(call_err))
         done_cb()

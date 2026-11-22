@@ -103,13 +103,20 @@ end
 
 -- Images d'un dossier, dans l'ordre de lecture.
 local function list_images(dir)
-    local files = {}
-    if lfs.attributes(dir, "mode") ~= "directory" then return files end
+    local entries = {}
+    if lfs.attributes(dir, "mode") ~= "directory" then return {} end
     for f in lfs.dir(dir) do
-        if f ~= "." and f ~= ".." and is_image(f) and not f:match("^0000_cover") then files[#files + 1] = f end
+        if f ~= "." and f ~= ".." and is_image(f) and not f:match("^0000_cover") then
+            -- Calculer la clé naturelle une seule fois, pas à chaque comparaison du tri.
+            entries[#entries + 1] = { name = f, key = natural_key(f) }
+        end
     end
-    table.sort(files, function(a, b) return natural_key(a) < natural_key(b) end)
-    for i, f in ipairs(files) do files[i] = dir .. "/" .. f end
+    table.sort(entries, function(a, b)
+        if a.key == b.key then return a.name < b.name end
+        return a.key < b.key
+    end)
+    local files = {}
+    for i, entry in ipairs(entries) do files[i] = dir .. "/" .. entry.name end
     return files
 end
 

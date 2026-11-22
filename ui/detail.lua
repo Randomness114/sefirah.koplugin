@@ -94,6 +94,15 @@ local _reviews_fetch_id = 0  -- même logique que _fetch_id, pour annuler un fet
 -- (Plus aimé). Même vocabulaire que celui passé aux extensions
 -- (ext.parseReviews(path, page, sort)), donc plus de traduction à faire.
 local _reviews_sort      = "newest"
+
+-- Tri passé aux extensions (ext.parseReviews(path, page, sort), 3e argument
+-- optionnel) — vocabulaire GÉNÉRIQUE : "newest" | "oldest" | "mostliked".
+-- Chaque extension le traduit vers son propre paramètre d'API ; c'est déjà
+-- exactement la valeur de _reviews_sort.
+local function current_api_sort()
+    return _reviews_sort
+end
+
 local _reviews_view_page = 1  -- page actuellement affichée dans l'onglet Avis (tourne-page comme
                                -- Chapitres ; chaque avis a une hauteur fixe — voir
                                -- REVIEW_TEXT_MAX_CHARS — donc la pagination est un simple découpage
@@ -759,23 +768,28 @@ local function chapters_in_range(first_num, last_num)
     if not first_num or not last_num then return {} end
     if first_num > last_num then first_num, last_num = last_num, first_num end
 
-    local out = {}
+    -- Calculer le numéro et la clé de repli une seule fois : le comparateur
+    -- de table.sort est appelé de nombreuses fois et ne doit pas reparcourir
+    -- les titres des chapitres à chaque comparaison.
+    local indexed = {}
     for i, ch in ipairs(_all_chapters) do
         local n = chapter_number_value(ch, nil)
         if n and n >= first_num and n <= last_num then
-            out[#out + 1] = ch
+            indexed[#indexed + 1] = {
+                ch = ch,
+                n = n,
+                name = tostring(ch.name or ch.title or ""),
+                index = i,
+            }
         end
     end
-    table.sort(out, function(a, b)
-        local na, nb = chapter_number_value(a, math.huge), chapter_number_value(b, math.huge)
-        if na ~= nb then return na < nb end
-        -- Même risque qu'en ligne ~1080 (tri des avis) : sans dernier critère,
-        -- de nombreux chapitres à égalité (ex. plusieurs sans numéro
-        -- détectable, tous à math.huge) peuvent faire planter table.sort
-        -- avec "invalid order function for sorting". On force un ordre
-        -- total avec le nom en repli.
-        return tostring(a.name or a.title or "") < tostring(b.name or b.title or "")
+    table.sort(indexed, function(a, b)
+        if a.n ~= b.n then return a.n < b.n end
+        if a.name ~= b.name then return a.name < b.name end
+        return a.index < b.index
     end)
+    local out = {}
+    for i, entry in ipairs(indexed) do out[i] = entry.ch end
     return out
 end
 
@@ -819,11 +833,67 @@ local function open_export(info, only_chapters)
     })
 end
 
+-- Mangas : télécharge réellement les pages (CBZ), un chapitre après l'autre.
+-- (Avant, Cache.downloadChapters ne stockait que du texte : la barre se remplissait
+-- mais aucune image n'était enregistrée.) Le CBZ est nommé d'après la position du
+-- chapitre dans _all_chapters, exactement comme à l'ouverture (ui/mangaopen.lua).
+local function start_manga_download(info, ext, chapters)
+    local Manga = require("core.manga")
+    local novel_title = info.name or info.title or info.path or "manga"
+    local my_fetch_id = _fetch_id
+    local pos, pos_by_path = {}, {}
+    for i, ch in ipairs(_all_chapters) do
+        pos[ch] = i
+        if ch.path then pos_by_path[ch.path] = i end
+    end
+    local total, n_failed, popup = #chapters, 0, nil
+    local function say(text)
+        if popup then UIManager:close(popup) end
+        popup = InfoMessage:new{ text = text, timeout = 60 }
+        UIManager:show(popup)
+        UIManager:forceRePaint()
+    end
+    local function finish()
+        if popup then UIManager:close(popup); popup = nil end
+        local msg = T("Téléchargement terminé.")
+        if n_failed > 0 then
+            msg = string.format("%d / %d chapitres téléchargés, %d en échec (réessaie pour reprendre).",
+                total - n_failed, total, n_failed)
+        end
+        UIManager:show(InfoMessage:new{ text = msg, timeout = 3 })
+        if my_fetch_id == _fetch_id and _panel then Detail.rebuild(info, true) end
+    end
+    local step
+    local function next_step(i, ok)
+        if not ok then n_failed = n_failed + 1 end
+        UIManager:scheduleIn(0.2, function() step(i + 1) end)
+    end
+    step = function(i)
+        if i > total then return finish() end
+        local ch = chapters[i]
+        say(string.format(T("Téléchargement %d / %d…"), i, total))
+        local ok_dl, err = pcall(Manga.download, {
+            ext = ext, chapter = ch, novel_title = novel_title,
+            index = pos[ch] or pos_by_path[ch.path] or 0,
+            cover_fn = function() return Manga.fetchCover(_source_id, info) end,
+            on_done = function(ok) next_step(i, ok) end,
+        })
+        if not ok_dl then
+            logger.warn("Sefirah/Detail: échec du téléchargement manga :", tostring(err))
+            next_step(i, false)
+        end
+    end
+    Online.run(function() step(1) end)
+end
+
 local function start_download(info, chapters)
     local ext = ExtMgr.get(_source_id)
     if not ext or #chapters == 0 then
         UIManager:show(InfoMessage:new{ text = T("Aucun chapitre à télécharger dans cette plage."), timeout = 2 })
         return
+    end
+    if ext.type == "manga" then
+        return start_manga_download(info, ext, chapters)
     end
     -- Romans : les chapitres vont dans la file d'attente (core/dlqueue.lua). Elle
     -- travaille en arrière-plan, reprend après une coupure réseau et laisse
@@ -1044,17 +1114,17 @@ local function translate_chapters(info, chapters)
                         n_failed = n_failed + 1
                         return step(i + 1)
                     end
-                    local ok, tr, err = pcall(Translate.chapter, html, _source_id, novel_path, key)
-                    if ok and tr then
-                        n_done = n_done + 1
-                        -- Rend la main à l'UI avant le chapitre suivant : un
-                        -- appui pendant la traduction est ainsi pris en compte
-                        -- (arrêt) au lieu d'être perdu.
-                        UIManager:scheduleIn(0.3, function() step(i + 1) end)
-                    else
-                        -- Clé refusée / quota : inutile d'insister sur les chapitres suivants.
-                        finish(ok and err or tr)
-                    end
+                    -- Traduction en arrière-plan : l'écran reste libre (un appui
+                    -- pendant la traduction est pris en compte → arrêt).
+                    Translate.chapterAsync(html, _source_id, novel_path, key, function(tr, err)
+                        if tr then
+                            n_done = n_done + 1
+                            UIManager:scheduleIn(0.3, function() step(i + 1) end)
+                        else
+                            -- Clé refusée / quota : inutile d'insister sur les chapitres suivants.
+                            finish(err)
+                        end
+                    end)
                 end
 
                 if Cache.isChapterCached(_source_id, novel_path, key) then
@@ -1766,14 +1836,6 @@ local function reviews_key(source_id, path)
     return tostring(source_id) .. "|" .. tostring(path)
 end
 
--- Tri passé aux extensions (ext.parseReviews(path, page, sort), 3e argument
--- optionnel) — vocabulaire GÉNÉRIQUE : "newest" | "oldest" | "mostliked".
--- Chaque extension le traduit vers son propre paramètre d'API ; c'est déjà
--- exactement la valeur de _reviews_sort.
-local function current_api_sort()
-    return _reviews_sort
-end
-
 -- Récupère une page d'avis et fusionne le résultat dans _reviews. Rappelée à
 -- la fois pour le premier chargement (page 1) et pour "Charger plus d'avis".
 local function fetch_reviews_page(ext, source_id, path, page, replace_first_page)
@@ -2002,7 +2064,14 @@ end
 local function sorted_reviews(reviews)
     local list = {}
     for i, rev in ipairs(ReviewThreads.flatten(reviews)) do
-        list[i] = { rev = rev, idx = i }
+        -- Les dates texte et les likes sont convertis une fois, pas à chaque
+        -- appel du comparateur pendant le tri.
+        list[i] = {
+            rev = rev,
+            idx = i,
+            date = review_date_value(rev.date),
+            likes = tonumber(rev.likes) or 0,
+        }
     end
     -- table.sort() de Lua peut lever "invalid order function for sorting"
     -- quand beaucoup d'éléments sont à égalité sur toutes les clés de tri
@@ -2019,13 +2088,11 @@ local function sorted_reviews(reviews)
     table.sort(list, function(wa, wb)
         local a, b = wa.rev, wb.rev
         if _reviews_sort == "mostliked" then
-            local la, lb = tonumber(a.likes) or 0, tonumber(b.likes) or 0
-            if la ~= lb then return la > lb end
+            if wa.likes ~= wb.likes then return wa.likes > wb.likes end
         else
-            local da, db = review_date_value(a.date), review_date_value(b.date)
-            if da ~= db then
-                if _reviews_sort == "oldest" then return da < db end
-                return da > db
+            if wa.date ~= wb.date then
+                if _reviews_sort == "oldest" then return wa.date < wb.date end
+                return wa.date > wb.date
             end
         end
         -- Dernier recours : indice d'origine, toujours distinct entre deux

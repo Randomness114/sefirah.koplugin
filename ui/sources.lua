@@ -43,10 +43,10 @@ local function open_search()
     dlg:onShowKeyboard()
 end
 
-local function matches(meta, q)
-    q = q:lower()
+local function matches(meta, normalized_query)
+    -- La requête est normalisée une seule fois avant de parcourir le catalogue.
     for _, f in ipairs({ meta.name, meta.site, meta.id, meta.lang }) do
-        if f and tostring(f):lower():find(q, 1, true) then return true end
+        if f and tostring(f):lower():find(normalized_query, 1, true) then return true end
     end
     return false
 end
@@ -224,7 +224,10 @@ function Sources.build_rows()
     local all = ExtMgr.visibleAll()
     if _search then
         local found = {}
-        for _, m in ipairs(all) do if matches(m, _search) then found[#found + 1] = m end end
+        local normalized_query = _search:lower()
+        for _, m in ipairs(all) do
+            if matches(m, normalized_query) then found[#found + 1] = m end
+        end
         all = found
         table.insert(rows, P.makeRow(T('Recherche : « ') .. _search .. T(' »  ·  toucher pour changer'), {
             dim = true, callback = open_search,
